@@ -20,12 +20,10 @@ dependencies = [
     "pandas==2.2.3",
     "peft==0.17.1",
     "termcolor==3.2.0",
-    "torch==2.7.0",
-    "torchvision==0.22.0",
+    "torch==2.8.0+cu128",
+    "torchvision==0.23.0+cu128",
     "transformers==4.51.3",
-    "tyro==0.9.17",
-    "flash-attn==2.7.4.post1",
-    "click==8.1.8",
+    "tyro==0.9.17",    "click==8.1.8",
     "datasets==3.6.0",
     "einops==0.8.1",
     "gymnasium==1.2.2",
@@ -33,28 +31,39 @@ dependencies = [
     "numpy==1.26.4",
     "omegaconf==2.3.0",
     "scipy==1.15.3",
-    "torchcodec==0.4.0",
+    "torchcodec==0.7.0",
     "wandb==0.23.0",
-    "pyzmq==27.0.1",
-    "deepspeed==0.17.6",
-]
+    "pyzmq==27.0.1",]
 
 [project.optional-dependencies]
 dev = [
     "ruff",
     "ipython",
 ]
+# Compatibility alias for older commands/docs that still use `uv run --extra=gpu`.
+# CUDA-enabled PyTorch is already part of the base dependencies in this checkout.
+gpu = []
 tensorrt = [
     "onnx>=1.20.0",
     "tensorrt>=10.14.1.48.post1",
+]
+
+train = [
+    "flash-attn==2.8.3",
+    "deepspeed==0.17.6",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["gr00t*"]
 
-[tool.uv.extra-build-dependencies]
-flash-attn = ["torch==2.7.0", "numpy==1.26.4"]
+# [수정됨] 기존 extra-build-dependencies는 삭제하거나 주석 처리
+# [tool.uv.extra-build-dependencies]
+# flash-attn = ["torch==2.8.0+cu128", "numpy==1.26.4"]
+
+# [신규 추가] 빌드 격리 해제 설정
+[tool.uv]
+no-build-isolation-package = ["flash-attn"]
 
 [tool.ruff]
 line-length = 100
@@ -94,3 +103,12 @@ force-wrap-aliases = false
 split-on-trailing-comma = false
 lines-after-imports = 2
 section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+# ---- uv: install CUDA-enabled PyTorch wheels for RTX 5080 on Linux ----
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }

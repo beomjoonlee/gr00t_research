@@ -3,6 +3,7 @@ import os
 import torch
 from transformers import AutoConfig, AutoModel
 from transformers.feature_extraction_utils import BatchFeature
+from transformers.utils import is_flash_attn_2_available
 
 
 class EagleBackbone(torch.nn.Module):
@@ -30,21 +31,27 @@ class EagleBackbone(torch.nn.Module):
 
         super().__init__()
 
-        # Add attention kwargs
-        extra_kwargs = {}
-        if use_flash_attention:
-            extra_kwargs["attn_implementation"] = "flash_attention_2"
+        attn_implementation = "flash_attention_2" if use_flash_attention else "sdpa"
+        if attn_implementation == "flash_attention_2" and not is_flash_attn_2_available():
+            print("flash-attn is unavailable; falling back to sdpa attention for Eagle backbone")
+            attn_implementation = "sdpa"
+
+        extra_kwargs = dict(transformers_loading_kwargs)
+        extra_kwargs["trust_remote_code"] = True
+        extra_kwargs["attn_implementation"] = attn_implementation
         if load_bf16:
             extra_kwargs["torch_dtype"] = torch.bfloat16
 
         if model_name == "nvidia/Eagle-Block2A-2B-v2":
-            assert use_flash_attention, (
-                "nvidia/Eagle-Block2A-2B-v2 requires flash attention by default"
-            )
-            assert load_bf16, "nvidia/Eagle-Block2A-2B-v2 requires bfloat16 by default"
             eagle_path = os.path.join(os.path.dirname(__file__), "nvidia", "Eagle-Block2A-2B-v2")
             config = AutoConfig.from_pretrained(eagle_path, trust_remote_code=True)
-            self.model = AutoModel.from_config(config, trust_remote_code=True)
+            config._attn_implementation = attn_implementation
+            config._attn_implementation_autoset = False
+            config.text_config._attn_implementation = attn_implementation
+            config.text_config._attn_implementation_autoset = False
+            config.vision_config._attn_implementation = attn_implementation
+            config.vision_config._attn_implementation_autoset = False
+            self.model = AutoModel.from_config(config, **extra_kwargs)
         else:
             raise ValueError(f"Model {model_name} not supported")
 
