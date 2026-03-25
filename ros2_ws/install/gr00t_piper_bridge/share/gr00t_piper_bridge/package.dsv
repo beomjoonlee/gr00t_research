@@ -1,0 +1,6 @@
+source;share/gr00t_piper_bridge/hook/pythonpath.ps1
+source;share/gr00t_piper_bridge/hook/pythonpath.dsv
+source;share/gr00t_piper_bridge/hook/pythonpath.sh
+source;share/gr00t_piper_bridge/hook/ament_prefix_path.ps1
+source;share/gr00t_piper_bridge/hook/ament_prefix_path.dsv
+source;share/gr00t_piper_bridge/hook/ament_prefix_path.sh

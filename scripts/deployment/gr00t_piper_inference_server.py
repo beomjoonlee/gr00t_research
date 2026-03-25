@@ -49,28 +49,28 @@ def send_obj(sock: socket.socket, obj: Any) -> None:
 class Gr00tSocketInferenceServer:
     def __init__(self, model_path: Path, device: str):
         self.policy = Gr00tPolicy(
-            embodiment_tag=EmbodimentTag.GR1,
+            embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
             model_path=str(model_path),
             device=device,
         )
         self.modality = self.policy.get_modality_config()
-        self.video_key = self.modality["video"].modality_keys[0]
-        self.state_keys = self.modality["state"].modality_keys
+        self.video_keys = self.modality["video"].modality_keys
+        self.state_key = self.modality["state"].modality_keys[0]
+        self.action_key = self.modality["action"].modality_keys[0]
         self.language_key = self.modality["language"].modality_keys[0]
 
     def adapt_request(self, req: dict[str, Any]) -> dict[str, Any]:
-        image = np.asarray(req["image"], dtype=np.uint8)
-        state = req["state"]
+        images = req["images"]
+        state = np.asarray(req["state"], dtype=np.float32).reshape(1, 1, -1)
         instruction = str(req.get("prompt", "pick and place the target object"))
-
-        obs_state: dict[str, np.ndarray] = {}
-        for key in self.state_keys:
-            value = np.asarray(state[key], dtype=np.float32).reshape(1, 1, -1)
-            obs_state[key] = value
+        obs_video = {}
+        for key in self.video_keys:
+            image = np.asarray(images[key], dtype=np.uint8)
+            obs_video[key] = image.reshape(1, 1, *image.shape)
 
         return {
-            "video": {self.video_key: image.reshape(1, 1, *image.shape)},
-            "state": obs_state,
+            "video": obs_video,
+            "state": {self.state_key: state},
             "language": {self.language_key: [[instruction]]},
         }
 
