@@ -2,30 +2,31 @@
 
 from __future__ import annotations
 
+import json
 import logging
-import socket
-import struct
 from pathlib import Path
+import sys
 from typing import Any
 
-import torch.nn.functional as F
-
-import msgpack
-import msgpack_numpy as m
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 import tyro
 from PIL import Image
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.types import MessageType
 from gr00t.policy.gr00t_policy import Gr00tPolicy, _rec_to_dtype
+from gr00t.utils.video_utils import get_frames_by_indices
 
-m.patch()
 
 DEFAULT_MODEL_PATH = Path("gr00t/model/gr00t_rgb_run/checkpoint-199800")
-DEFAULT_HOST = "0.0.0.0"
-DEFAULT_PORT = 5555
+DEFAULT_CHUNK_DIR = Path("gr00t/data/chunk")
 PATCH_PIXELS = 28
 
 
@@ -110,44 +111,22 @@ class CaptureAttnProcessor2_0:
         return hidden_states
 
 
-
-def _recv_exact(sock: socket.socket, n: int) -> bytes:
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise ConnectionError("socket closed")
-        buf += chunk
-    return buf
-
-
-def recv_obj(sock: socket.socket) -> Any:
-    header = _recv_exact(sock, 8)
-    (size,) = struct.unpack("!Q", header)
-    payload = _recv_exact(sock, size)
-    return msgpack.unpackb(payload, raw=False)
-
-
-def send_obj(sock: socket.socket, obj: Any) -> None:
-    payload = msgpack.packb(obj, use_bin_type=True)
-    header = struct.pack("!Q", len(payload))
-    sock.sendall(header + payload)
-
-
-class Gr00tSocketInferenceServer:
+class Gr00tChunkAttentionDebugger:
     def __init__(
         self,
         model_path: Path,
         device: str,
-        show_images: bool = False,
+        output_dir: Path,
+        show_images: bool = True,
         dump_image_saliency: bool = False,
-        dump_action_attention: bool = False,
+        dump_action_attention: bool = True,
     ):
         self.policy = Gr00tPolicy(
             embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
             model_path=str(model_path),
             device=device,
         )
+        self.output_dir = output_dir
         self.show_images = show_images
         self.dump_image_saliency = dump_image_saliency
         self.dump_action_attention = dump_action_attention
@@ -169,9 +148,6 @@ class Gr00tSocketInferenceServer:
             attn = block.attn1
             if getattr(attn, "cross_attention_dim", None) is None:
                 continue
-            if getattr(attn, "_action_attention_hooked", False):
-                self._action_attention_modules.append(attn)
-                continue
 
             attends_image = True
             if use_alternate:
@@ -179,7 +155,6 @@ class Gr00tSocketInferenceServer:
 
             processor = CaptureAttnProcessor2_0(block_idx=block_idx, attends_image=attends_image)
             attn.set_processor(processor)
-            attn._action_attention_hooked = True
             attn._last_attention_processor = processor
             self._action_attention_modules.append(attn)
 
@@ -207,7 +182,11 @@ class Gr00tSocketInferenceServer:
         target = max(preferred or fallback or captures, key=lambda item: item[0])
         module = target[3]
         processor = getattr(module, "_last_attention_processor", None)
-        return processor.last_attention_probs, {"block_idx": processor.block_idx, "attends_image": processor.attends_image, "heads": module.heads}
+        return processor.last_attention_probs, {
+            "block_idx": processor.block_idx,
+            "attends_image": processor.attends_image,
+            "heads": module.heads,
+        }
 
     def _prepare_collated_inputs(self, obs: dict[str, Any]):
         single_obs = {
@@ -284,9 +263,6 @@ class Gr00tSocketInferenceServer:
         return specs
 
     def _dump_action_attention(self, backbone_inputs, action_inputs) -> None:
-        dump_dir = Path("/tmp/gr00t_infer_debug")
-        dump_dir.mkdir(parents=True, exist_ok=True)
-
         self._reset_action_attention_cache()
         with torch.inference_mode():
             backbone_outputs = self.policy.model.backbone(backbone_inputs)
@@ -332,19 +308,16 @@ class Gr00tSocketInferenceServer:
             next_offset = offset + spec["token_len"]
             patch_map = image_token_scores[offset:next_offset].reshape(spec["grid_h"], spec["grid_w"])
             patch_map = self._normalize_map(patch_map)
-            stem = key.replace('/', '_')
-            np.save(dump_dir / f"{stem}_action_attn.npy", patch_map)
+            stem = key.replace("/", "_")
+            np.save(self.output_dir / f"{stem}_action_attn.npy", patch_map)
             self._save_overlay(
-                dump_dir / f"{stem}.png",
-                dump_dir / f"{stem}_action_attn_overlay.png",
+                self.output_dir / f"{stem}.png",
+                self.output_dir / f"{stem}_action_attn_overlay.png",
                 patch_map,
             )
             offset = next_offset
 
     def _dump_image_saliency(self, backbone_inputs, action_inputs) -> None:
-        dump_dir = Path('/tmp/gr00t_infer_debug')
-        dump_dir.mkdir(parents=True, exist_ok=True)
-
         pixel_values = backbone_inputs["pixel_values"]
         backbone_inputs = dict(backbone_inputs)
         if isinstance(pixel_values, list):
@@ -370,29 +343,30 @@ class Gr00tSocketInferenceServer:
 
         for idx, key in enumerate(self.video_keys):
             sal_np = self._normalize_map(saliency[idx].numpy())
-            stem = key.replace('/', '_')
-            np.save(dump_dir / f"{stem}_saliency.npy", sal_np)
+            stem = key.replace("/", "_")
+            np.save(self.output_dir / f"{stem}_saliency.npy", sal_np)
             self._save_overlay(
-                dump_dir / f"{stem}.png",
-                dump_dir / f"{stem}_saliency_overlay.png",
+                self.output_dir / f"{stem}.png",
+                self.output_dir / f"{stem}_saliency_overlay.png",
                 sal_np,
             )
 
     def _dump_model_input_images(self, backbone_inputs) -> None:
-        dump_dir = Path('/tmp/gr00t_infer_debug')
-        dump_dir.mkdir(parents=True, exist_ok=True)
         pixel_values = backbone_inputs["pixel_values"]
         tensors = pixel_values if isinstance(pixel_values, list) else [pixel_values]
+
         for key, tensor in zip(self.video_keys, tensors):
             image_tensor = tensor[0].detach().float().cpu()
             image_tensor = ((image_tensor + 1.0) * 127.5).clamp(0, 255)
-            frame = image_tensor.permute(1, 2, 0).numpy().astype(np.uint8)
-            Image.fromarray(frame).save(dump_dir / f"{key.replace('/', '_')}.png")
+            image = image_tensor.permute(1, 2, 0).numpy().astype(np.uint8)
+            Image.fromarray(image).save(self.output_dir / f"{key.replace('/', '_')}.png")
 
-    def adapt_request(self, req: dict[str, Any]) -> dict[str, Any]:
-        images = req["images"]
-        state = np.asarray(req["state"], dtype=np.float32).reshape(1, 1, -1)
-        instruction = str(req.get("prompt", "pick and place the target object"))
+    def build_observation(
+        self,
+        images: dict[str, np.ndarray],
+        state: np.ndarray,
+        instruction: str,
+    ) -> dict[str, Any]:
         obs_video = {}
         for key in self.video_keys:
             image = np.asarray(images[key], dtype=np.uint8)
@@ -400,13 +374,11 @@ class Gr00tSocketInferenceServer:
 
         obs = {
             "video": obs_video,
-            "state": {self.state_key: state},
+            "state": {self.state_key: np.asarray(state, dtype=np.float32).reshape(1, 1, -1)},
             "language": {self.language_key: [[instruction]]},
         }
 
-        backbone_inputs = action_inputs = None
-        if self.show_images or self.dump_image_saliency or self.dump_action_attention:
-            backbone_inputs, action_inputs = self._prepare_model_inputs(obs)
+        backbone_inputs, action_inputs = self._prepare_model_inputs(obs)
         if self.show_images or self.dump_image_saliency or self.dump_action_attention:
             self._dump_model_input_images(backbone_inputs)
         if self.dump_image_saliency:
@@ -416,54 +388,199 @@ class Gr00tSocketInferenceServer:
 
         return obs
 
-    def infer(self, req: dict[str, Any]) -> dict[str, Any]:
-        obs = self.adapt_request(req)
-        action_chunk, _ = self.policy.get_action(obs)
-        serializable = {key: value[0].astype(np.float32) for key, value in action_chunk.items()}
-        return {"ok": True, "actions": serializable}
+
+def _ensure_numpy_frame(frame: np.ndarray) -> np.ndarray:
+    if frame.dtype != np.uint8:
+        frame = frame.astype(np.uint8)
+    if frame.ndim != 3 or frame.shape[-1] != 3:
+        raise ValueError(f"Expected RGB frame with shape (H, W, 3), got {frame.shape}")
+    return frame
 
 
-def main(
+def _load_parquet_row(chunk_dir: Path, episode_idx: int, frame_idx: int) -> tuple[pd.DataFrame, pd.Series]:
+    parquet_path = chunk_dir / f"episode_{episode_idx:06d}.parquet"
+    if not parquet_path.exists():
+        raise FileNotFoundError(f"Missing parquet file: {parquet_path}")
+
+    df = pd.read_parquet(parquet_path)
+    if frame_idx < 0 or frame_idx >= len(df):
+        raise IndexError(
+            f"frame_idx={frame_idx} is out of range for {parquet_path} with {len(df)} rows"
+        )
+    return df, df.iloc[frame_idx]
+
+
+def _load_views(
+    chunk_dir: Path,
+    episode_idx: int,
+    frame_idx: int,
+    view_dir_names: dict[str, str],
+) -> dict[str, np.ndarray]:
+    frames = {}
+    for logical_name, directory_name in view_dir_names.items():
+        video_path = chunk_dir / directory_name / f"episode_{episode_idx:06d}.mp4"
+        if not video_path.exists():
+            raise FileNotFoundError(f"Missing video file for {logical_name}: {video_path}")
+        frame = get_frames_by_indices(str(video_path), [frame_idx])[0]
+        frames[logical_name] = _ensure_numpy_frame(np.asarray(frame))
+    return frames
+
+
+def _build_request_images(model_video_keys: list[str], frames: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    key_map = {
+        "rgb.head_256_256": "head",
+        "rgb.left_wrist_256_256": "left",
+        "rgb.right_wrist_256_256": "right",
+    }
+    images = {}
+    for model_key in model_video_keys:
+        logical_name = key_map.get(model_key)
+        if logical_name is None:
+            raise KeyError(f"Unsupported model video key: {model_key}")
+        images[model_key] = frames[logical_name]
+    return images
+
+
+def _save_action_plot(
+    pred_action: np.ndarray,
+    gt_action: np.ndarray,
+    out_path: Path,
+) -> None:
+    indices = np.arange(len(gt_action))
+    width = 0.38
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+
+    axes[0].bar(indices - width / 2, gt_action, width=width, label="GT")
+    axes[0].bar(indices + width / 2, pred_action, width=width, label="Pred")
+    axes[0].set_ylabel("Joint Value")
+    axes[0].set_title("Prediction vs Ground Truth")
+    axes[0].legend()
+    axes[0].grid(axis="y", alpha=0.2)
+
+    abs_error = np.abs(pred_action - gt_action)
+    axes[1].bar(indices, abs_error, width=0.6, color="tab:red")
+    axes[1].set_ylabel("Absolute Error")
+    axes[1].set_xlabel("Joint Index")
+    axes[1].set_title("Absolute Error")
+    axes[1].grid(axis="y", alpha=0.2)
+
+    plt.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def _save_summary(
+    out_dir: Path,
+    episode_idx: int,
+    frame_idx: int,
+    prompt: str,
+    pred_action: np.ndarray,
+    gt_action: np.ndarray,
+    pred_action_chunk: np.ndarray,
+    gt_action_chunk: np.ndarray,
+) -> None:
+    abs_error = np.abs(pred_action - gt_action)
+    summary = {
+        "episode_idx": int(episode_idx),
+        "frame_idx": int(frame_idx),
+        "prompt": prompt,
+        "pred_action_chunk_shape": list(pred_action_chunk.shape),
+        "gt_action_chunk_shape": list(gt_action_chunk.shape),
+        "pred_action": pred_action.tolist(),
+        "gt_action": gt_action.tolist(),
+        "abs_error": abs_error.tolist(),
+        "l1_mean": float(abs_error.mean()),
+        "l2": float(np.linalg.norm(pred_action - gt_action)),
+        "max_abs_error": float(abs_error.max()),
+    }
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    np.save(out_dir / "pred_action.npy", pred_action)
+    np.save(out_dir / "gt_action.npy", gt_action)
+    np.save(out_dir / "pred_action_chunk.npy", pred_action_chunk)
+    np.save(out_dir / "gt_action_chunk.npy", gt_action_chunk)
+    np.save(out_dir / "abs_error.npy", abs_error)
+    _save_action_plot(pred_action, gt_action, out_dir / "action_compare.png")
+
+
+def run(
+    chunk_dir: Path = DEFAULT_CHUNK_DIR,
     model_path: Path = DEFAULT_MODEL_PATH,
-    host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    episode_idx: int = 0,
+    frame_idx: int = 0,
+    prompt: str = "pick and place the target object",
+    output_dir: Path = Path("/tmp/gr00t_chunk_debug"),
     device: str = "cuda",
-    show_images: bool = False,
+    show_images: bool = True,
     dump_image_saliency: bool = False,
-    dump_action_attention: bool = False,
+    dump_action_attention: bool = True,
+    head_dir_name: str = "head",
+    left_dir_name: str = "left",
+    right_dir_name: str = "wrist",
 ) -> None:
     logging.basicConfig(level=logging.INFO, force=True)
-    logging.info("Loading GR00T checkpoint from %s", model_path)
-    server = Gr00tSocketInferenceServer(
+    torch.set_grad_enabled(False)
+
+    df, row = _load_parquet_row(chunk_dir, episode_idx, frame_idx)
+    state = np.asarray(row["observation.state"], dtype=np.float32)
+    gt_action = np.asarray(row["action"], dtype=np.float32)
+
+    frames = _load_views(
+        chunk_dir=chunk_dir,
+        episode_idx=episode_idx,
+        frame_idx=frame_idx,
+        view_dir_names={
+            "head": head_dir_name,
+            "left": left_dir_name,
+            "right": right_dir_name,
+        },
+    )
+
+    step_dir = output_dir / f"episode_{episode_idx:06d}" / f"frame_{frame_idx:06d}"
+    step_dir.mkdir(parents=True, exist_ok=True)
+
+    debugger = Gr00tChunkAttentionDebugger(
         model_path=model_path,
         device=device,
+        output_dir=step_dir,
         show_images=show_images,
         dump_image_saliency=dump_image_saliency,
         dump_action_attention=dump_action_attention,
     )
-    logging.info("Policy loaded. Listening on %s:%s", host, port)
 
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((host, port))
-    srv.listen(1)
+    images = _build_request_images(debugger.video_keys, frames)
+    obs = debugger.build_observation(images=images, state=state, instruction=prompt)
+    action_chunk, _ = debugger.policy.get_action(obs)
 
-    while True:
-        conn, addr = srv.accept()
-        logging.info("Client connected: %s", addr)
-        try:
-            while True:
-                req = recv_obj(conn)
-                resp = server.infer(req)
-                send_obj(conn, resp)
-        except Exception as exc:
-            logging.info("Client disconnected / error: %s", exc)
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+    pred_action_chunk = np.asarray(action_chunk[debugger.action_key][0], dtype=np.float32)
+    if pred_action_chunk.ndim == 1:
+        pred_action_chunk = pred_action_chunk[None, :]
+
+    gt_end_idx = min(frame_idx + pred_action_chunk.shape[0], len(df))
+    gt_action_chunk = np.stack(df.iloc[frame_idx:gt_end_idx]["action"].to_list(), axis=0).astype(np.float32)
+    if gt_action_chunk.shape[0] < pred_action_chunk.shape[0]:
+        pad_count = pred_action_chunk.shape[0] - gt_action_chunk.shape[0]
+        pad = np.repeat(gt_action_chunk[-1][None, :], pad_count, axis=0)
+        gt_action_chunk = np.concatenate([gt_action_chunk, pad], axis=0)
+
+    pred_action = pred_action_chunk[0]
+    _save_summary(
+        out_dir=step_dir,
+        episode_idx=episode_idx,
+        frame_idx=frame_idx,
+        prompt=prompt,
+        pred_action=pred_action,
+        gt_action=gt_action,
+        pred_action_chunk=pred_action_chunk,
+        gt_action_chunk=gt_action_chunk,
+    )
+
+    logging.info("Saved debug outputs to %s", step_dir)
+    logging.info("Pred action: %s", np.array2string(pred_action, precision=5))
+    logging.info("GT action:   %s", np.array2string(gt_action, precision=5))
+    logging.info("Abs error:   %s", np.array2string(np.abs(pred_action - gt_action), precision=5))
+    logging.info("Episode length: %d", len(df))
 
 
 if __name__ == "__main__":
-    tyro.cli(main)
+    tyro.cli(run)

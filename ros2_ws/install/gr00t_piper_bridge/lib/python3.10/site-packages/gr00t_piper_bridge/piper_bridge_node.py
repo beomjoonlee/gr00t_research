@@ -42,7 +42,7 @@ def send_obj(sock: socket.socket, obj: Any) -> None:
     sock.sendall(header + payload)
 
 
-def image_msg_to_hwc_uint8(msg: Image, target_h: int, target_w: int) -> np.ndarray:
+def image_msg_to_hwc_uint8(msg: Image) -> np.ndarray:
     enc = (msg.encoding or "").lower()
     h, w = int(msg.height), int(msg.width)
 
@@ -62,27 +62,17 @@ def image_msg_to_hwc_uint8(msg: Image, target_h: int, target_w: int) -> np.ndarr
     else:
         raise ValueError(f"Unsupported image encoding: '{msg.encoding}'")
 
-    if (h, w) != (target_h, target_w):
-        try:
-            import cv2
-
-            img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-        except Exception:
-            out = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-            hh = min(target_h, h)
-            ww = min(target_w, w)
-            sy0 = (h - hh) // 2
-            sx0 = (w - ww) // 2
-            dy0 = (target_h - hh) // 2
-            dx0 = (target_w - ww) // 2
-            out[dy0 : dy0 + hh, dx0 : dx0 + ww] = img[sy0 : sy0 + hh, sx0 : sx0 + ww]
-            img = out
-
     return img.astype(np.uint8, copy=False)
 
 
 def blank_image(target_h: int, target_w: int) -> np.ndarray:
     return np.zeros((target_h, target_w, 3), dtype=np.uint8)
+
+
+def maybe_rotate_180(img: np.ndarray, enabled: bool) -> np.ndarray:
+    if not enabled:
+        return img
+    return np.ascontiguousarray(img[::-1, ::-1])
 
 
 class Gr00tPiperBridge(Node):
@@ -93,16 +83,19 @@ class Gr00tPiperBridge(Node):
         self.declare_parameter("server_port", 5555)
         self.declare_parameter("image_h", 256)
         self.declare_parameter("image_w", 256)
-        self.declare_parameter("prompt_text", "pick and place the red doll")
+        self.declare_parameter("prompt_text", "pick up the red object from the table and put it on the white plate")
         self.declare_parameter("topic_js_in", "/ec_robot_1/joint_states_single")
-        self.declare_parameter("topic_img_head", "/ec_sensor_1/camera/color/image_raw")
-        self.declare_parameter("topic_img_left_wrist", "/ec_sensor_2/camera/color/image_raw")
-        self.declare_parameter("topic_img_right_wrist", "/ec_sensor_3/camera/color/image_raw")
+        self.declare_parameter("topic_image_1", "/ec_sensor_3/camera/color/image_raw")
+        self.declare_parameter("topic_image_2", "/ec_sensor_2/camera/color/image_raw")
+        self.declare_parameter("topic_image_3", "/ec_sensor_1/camera/color/image_raw")
+        self.declare_parameter("rotate_image_1_180", False)
+        self.declare_parameter("rotate_image_2_180", False)
+        self.declare_parameter("rotate_image_3_180", False)
         self.declare_parameter("topic_js_out", "/ec_robot_1/joint_states")
         self.declare_parameter("topic_chunk_out", "/gr00t/action_chunk")
-        self.declare_parameter("infer_hz", 5.0)
-        self.declare_parameter("exec_hz", 20.0)
-        self.declare_parameter("action_chunk_len", 8)
+        self.declare_parameter("infer_hz", 2.0)
+        self.declare_parameter("exec_hz", 5.0)
+        self.declare_parameter("action_chunk_len", 16)
         self.declare_parameter(
             "piper_joint_names",
             ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"],
@@ -119,9 +112,12 @@ class Gr00tPiperBridge(Node):
         self.image_w = int(self.get_parameter("image_w").value)
         self.prompt_text = str(self.get_parameter("prompt_text").value)
         self.topic_js_in = str(self.get_parameter("topic_js_in").value)
-        self.topic_img_head = str(self.get_parameter("topic_img_head").value)
-        self.topic_img_left_wrist = str(self.get_parameter("topic_img_left_wrist").value)
-        self.topic_img_right_wrist = str(self.get_parameter("topic_img_right_wrist").value)
+        self.topic_image_1 = str(self.get_parameter("topic_image_1").value)
+        self.topic_image_2 = str(self.get_parameter("topic_image_2").value)
+        self.topic_image_3 = str(self.get_parameter("topic_image_3").value)
+        self.rotate_image_1_180 = bool(self.get_parameter("rotate_image_1_180").value)
+        self.rotate_image_2_180 = bool(self.get_parameter("rotate_image_2_180").value)
+        self.rotate_image_3_180 = bool(self.get_parameter("rotate_image_3_180").value)
         self.topic_js_out = str(self.get_parameter("topic_js_out").value)
         self.topic_chunk_out = str(self.get_parameter("topic_chunk_out").value)
         self.infer_hz = float(self.get_parameter("infer_hz").value)
@@ -139,15 +135,15 @@ class Gr00tPiperBridge(Node):
         sensor_qos.durability = DurabilityPolicy.VOLATILE
 
         self.joint_state: Optional[JointState] = None
-        self.image_head: Optional[Image] = None
-        self.image_left_wrist: Optional[Image] = None
-        self.image_right_wrist: Optional[Image] = None
+        self.image_1: Optional[Image] = None
+        self.image_2: Optional[Image] = None
+        self.image_3: Optional[Image] = None
         self._lock = threading.Lock()
 
         self.create_subscription(JointState, self.topic_js_in, self._cb_js, sensor_qos)
-        self.create_subscription(Image, self.topic_img_head, self._cb_img_head, sensor_qos)
-        self.create_subscription(Image, self.topic_img_left_wrist, self._cb_img_left_wrist, sensor_qos)
-        self.create_subscription(Image, self.topic_img_right_wrist, self._cb_img_right_wrist, sensor_qos)
+        self.create_subscription(Image, self.topic_image_1, self._cb_img_1, sensor_qos)
+        self.create_subscription(Image, self.topic_image_2, self._cb_img_2, sensor_qos)
+        self.create_subscription(Image, self.topic_image_3, self._cb_img_3, sensor_qos)
 
         self.pub_js = self.create_publisher(JointState, self.topic_js_out, 1)
         self.pub_chunk = self.create_publisher(Float32MultiArray, self.topic_chunk_out, 1)
@@ -186,17 +182,17 @@ class Gr00tPiperBridge(Node):
         with self._lock:
             self.joint_state = msg
 
-    def _cb_img_head(self, msg: Image) -> None:
+    def _cb_img_1(self, msg: Image) -> None:
         with self._lock:
-            self.image_head = msg
+            self.image_1 = msg
 
-    def _cb_img_left_wrist(self, msg: Image) -> None:
+    def _cb_img_2(self, msg: Image) -> None:
         with self._lock:
-            self.image_left_wrist = msg
+            self.image_2 = msg
 
-    def _cb_img_right_wrist(self, msg: Image) -> None:
+    def _cb_img_3(self, msg: Image) -> None:
         with self._lock:
-            self.image_right_wrist = msg
+            self.image_3 = msg
 
     def _infer_loop(self) -> None:
         period = 1.0 / self.infer_hz
@@ -210,12 +206,12 @@ class Gr00tPiperBridge(Node):
             next_t += period
 
             with self._lock:
-                if len(self._action_queue) > self.action_chunk_len:
+                if len(self._action_queue) > 12:
                     continue
                 joint_state = self.joint_state
-                image_head = self.image_head
-                image_left_wrist = self.image_left_wrist
-                image_right_wrist = self.image_right_wrist
+                image_1 = self.image_1
+                image_2 = self.image_2
+                image_3 = self.image_3
 
             if joint_state is None:
                 continue
@@ -230,20 +226,20 @@ class Gr00tPiperBridge(Node):
                     state = state[: self.piper_cmd_dim]
                 req = {
                     "images": {
-                        "rgb.head_256_256": image_msg_to_hwc_uint8(
-                            image_head, self.image_h, self.image_w
+                        "rgb.head_256_256": maybe_rotate_180(
+                            image_msg_to_hwc_uint8(image_1), self.rotate_image_1_180
                         )
-                        if image_head is not None
+                        if image_1 is not None
                         else blank_image(self.image_h, self.image_w),
-                        "rgb.left_wrist_256_256": image_msg_to_hwc_uint8(
-                            image_left_wrist, self.image_h, self.image_w
+                        "rgb.left_wrist_256_256": maybe_rotate_180(
+                            image_msg_to_hwc_uint8(image_2), self.rotate_image_2_180
                         )
-                        if image_left_wrist is not None
+                        if image_2 is not None
                         else blank_image(self.image_h, self.image_w),
-                        "rgb.right_wrist_256_256": image_msg_to_hwc_uint8(
-                            image_right_wrist, self.image_h, self.image_w
+                        "rgb.right_wrist_256_256": maybe_rotate_180(
+                            image_msg_to_hwc_uint8(image_3), self.rotate_image_3_180
                         )
-                        if image_right_wrist is not None
+                        if image_3 is not None
                         else blank_image(self.image_h, self.image_w),
                     },
                     "state": state,
@@ -289,7 +285,7 @@ class Gr00tPiperBridge(Node):
                 action = self._action_queue.popleft()
                 self._last_action = action
             else:
-                action = self._last_action
+                action = None
 
         if action is None or joint_state is None:
             return
