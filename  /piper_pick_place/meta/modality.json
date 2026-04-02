@@ -1,0 +1,38 @@
+{
+    "state": {
+        "arm": {
+            "start": 0,
+            "end": 6
+        },
+        "gripper": {
+            "start": 6,
+            "end": 7
+        }
+    },
+    "action": {
+        "arm": {
+            "start": 0,
+            "end": 6
+        },
+        "gripper": {
+            "start": 6,
+            "end": 7
+        }
+    },
+    "video": {
+        "side": {
+            "original_key": "observation.images.side"
+        },
+        "top": {
+            "original_key": "observation.images.top"
+        },
+        "wrist": {
+            "original_key": "observation.images.wrist"
+        }
+    },
+    "annotation": {
+        "human.action.task_description": {
+            "original_key": "task_index"
+        }
+    }
+}

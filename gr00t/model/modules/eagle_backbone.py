@@ -42,6 +42,10 @@ class EagleBackbone(torch.nn.Module):
         if load_bf16:
             extra_kwargs["torch_dtype"] = torch.bfloat16
 
+        # Remove keys not accepted by from_config / model __init__
+        for _key in ("local_files_only", "cache_dir", "token"):
+            extra_kwargs.pop(_key, None)
+
         if model_name == "nvidia/Eagle-Block2A-2B-v2":
             eagle_path = os.path.join(os.path.dirname(__file__), "nvidia", "Eagle-Block2A-2B-v2")
             config = AutoConfig.from_pretrained(eagle_path, trust_remote_code=True)
