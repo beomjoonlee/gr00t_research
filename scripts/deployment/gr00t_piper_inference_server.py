@@ -21,6 +21,9 @@ from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.types import MessageType
 from gr00t.policy.gr00t_policy import Gr00tPolicy, _rec_to_dtype
 
+# Register Piper modality config before policy creation
+import examples.Piper.piper_config  # noqa: F401
+
 m.patch()
 
 DEFAULT_MODEL_PATH = Path("gr00t/model/gr00t_rgb_run/checkpoint-199800")
@@ -153,8 +156,8 @@ class Gr00tSocketInferenceServer:
         self.dump_action_attention = dump_action_attention
         self.modality = self.policy.get_modality_config()
         self.video_keys = self.modality["video"].modality_keys
-        self.state_key = self.modality["state"].modality_keys[0]
-        self.action_key = self.modality["action"].modality_keys[0]
+        self.state_keys = self.modality["state"].modality_keys   # ["arm", "gripper"]
+        self.action_keys = self.modality["action"].modality_keys  # ["arm", "gripper"]
         self.language_key = self.modality["language"].modality_keys[0]
         self._action_attention_modules = []
         if self.dump_action_attention:
@@ -391,16 +394,22 @@ class Gr00tSocketInferenceServer:
 
     def adapt_request(self, req: dict[str, Any]) -> dict[str, Any]:
         images = req["images"]
-        state = np.asarray(req["state"], dtype=np.float32).reshape(1, 1, -1)
+        full_state = np.asarray(req["state"], dtype=np.float32)  # (7,)
         instruction = str(req.get("prompt", "pick and place the target object"))
         obs_video = {}
         for key in self.video_keys:
             image = np.asarray(images[key], dtype=np.uint8)
             obs_video[key] = image.reshape(1, 1, *image.shape)
 
+        # Split state into arm (6D) and gripper (1D) matching modality.json
+        obs_state = {
+            "arm": full_state[:6].reshape(1, 1, -1),
+            "gripper": full_state[6:7].reshape(1, 1, -1),
+        }
+
         obs = {
             "video": obs_video,
-            "state": {self.state_key: state},
+            "state": obs_state,
             "language": {self.language_key: [[instruction]]},
         }
 
@@ -419,8 +428,11 @@ class Gr00tSocketInferenceServer:
     def infer(self, req: dict[str, Any]) -> dict[str, Any]:
         obs = self.adapt_request(req)
         action_chunk, _ = self.policy.get_action(obs)
-        serializable = {key: value[0].astype(np.float32) for key, value in action_chunk.items()}
-        return {"ok": True, "actions": serializable}
+        # Concatenate arm (6D) + gripper (1D) into "control" (7D) for bridge compatibility
+        arm = action_chunk["arm"][0].astype(np.float32)      # (T, 6)
+        gripper = action_chunk["gripper"][0].astype(np.float32)  # (T, 1)
+        control = np.concatenate([arm, gripper], axis=-1)     # (T, 7)
+        return {"ok": True, "actions": {"control": control}}
 
 
 def main(
