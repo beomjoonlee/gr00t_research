@@ -92,4 +92,6 @@ class DataConfig:
     # DP Image Config
     image_crop_size: List[int] = field(default_factory=lambda: [244, 244])
     image_target_size: List[int] = field(default_factory=lambda: [224, 224])
-    video_backend: str = "torchcodec"
+    # Server env: torchcodec/ffmpeg dispatch fails to decode our H.264 mp4s, so use the
+    # opencv backend (still implemented in gr00t/utils/video_utils.py). Same workaround as N1.6.
+    video_backend: str = "opencv"

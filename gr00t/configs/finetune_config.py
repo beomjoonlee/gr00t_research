@@ -35,6 +35,15 @@ class FinetuneConfig:
     dataset_path: str
     """Path to the dataset root directory containing trajectory data for fine-tuning."""
 
+    extra_dataset_paths: list[str] | None = None
+    """Additional dataset root directories to mix in. Each path becomes its own dataset
+    spec (relative_length=1.0), so with equal mix_ratios every dataset is trained equally
+    regardless of frame count. Used for the Piper blue/green/red multi-dataset workflow."""
+
+    extra_mix_ratios: list[float] | None = None
+    """Optional per-extra-dataset mix ratios (main dataset fixed at 1.0). Omit for equal
+    representation across all datasets."""
+
     embodiment_tag: str
     """Embodiment tag (name or value, case-insensitive). See EmbodimentTag for known tags."""
 
