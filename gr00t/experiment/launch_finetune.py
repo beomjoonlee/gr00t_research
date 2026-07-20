@@ -37,17 +37,30 @@ if __name__ == "__main__":
     if ft_config.modality_config_path is not None:
         load_modality_config(ft_config.modality_config_path)
 
+    # Build dataset list: main dataset + optional extra datasets
+    all_paths = [ft_config.dataset_path]
+    if ft_config.extra_dataset_paths:
+        all_paths.extend(ft_config.extra_dataset_paths)
+
+    if ft_config.extra_mix_ratios and ft_config.extra_dataset_paths:
+        all_ratios = [1.0] + list(ft_config.extra_mix_ratios)
+    else:
+        all_ratios = [1.0] * len(all_paths)
+
+    datasets_cfg = [
+        {
+            "dataset_paths": [p],
+            "mix_ratio": r,
+            "embodiment_tag": embodiment_tag,
+        }
+        for p, r in zip(all_paths, all_ratios)
+    ]
+
     config = get_default_config().load_dict(
         {
             "data": {
                 "download_cache": False,
-                "datasets": [
-                    {
-                        "dataset_paths": [ft_config.dataset_path],
-                        "mix_ratio": 1.0,
-                        "embodiment_tag": embodiment_tag,
-                    }
-                ],
+                "datasets": datasets_cfg,
             }
         }
     )

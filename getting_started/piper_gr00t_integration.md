@@ -34,5 +34,6 @@ python3 /root/piper_gr00t_ros2_bridge.py
 
 현재는 Piper 한 팔 기준 최소 매핑만 사용한다.
 
+
 - `right_arm[:6]` -> `joint1..joint6`
 - `right_hand[0]` -> `gripper`

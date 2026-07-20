@@ -25,6 +25,12 @@ class FinetuneConfig:
     embodiment_tag: EmbodimentTag
     """Identifier specifying which embodiment (robot configuration) this fine-tuning run targets."""
 
+    extra_dataset_paths: list[str] | None = None
+    """Additional dataset paths to mix with the main dataset. All share the same embodiment tag."""
+
+    extra_mix_ratios: list[float] | None = None
+    """Mix ratios for extra datasets. If None, all datasets get equal ratio."""
+
     modality_config_path: str | None = None
     """
     Path to a Python file defining the modality configuration for the given embodiment. 

@@ -4,9 +4,9 @@ Convert Piper HDF5 dataset to GR00T LeRobot v2 format.
 HDF5 structure:
   observations/qpos/robot_1: (T, 7) - joint positions (6 arm + 1 gripper)
   qaction/robot_1: (T, 7) - joint actions
-  observations/images/sensor_2: (T, 480, 640, 3) - side camera
-  observations/images/sensor_3: (T, 480, 640, 3) - top camera
-  observations/images/sensor_4: (T, 480, 640, 3) - wrist camera
+  observations/images/sensor_2: (T, 480, 640, 3) - side camera (BGR)
+  observations/images/sensor_3: (T, 480, 640, 3) - top camera (BGR)
+  observations/images/sensor_4: (T, 480, 640, 3) - wrist camera (BGR)
   language_instruction: str
 
 Output: GR00T LeRobot v2 format with:
@@ -18,7 +18,6 @@ Output: GR00T LeRobot v2 format with:
 import argparse
 import json
 import os
-import subprocess
 
 import h5py
 import numpy as np
@@ -59,7 +58,8 @@ FPS = 10
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def images_to_mp4(images: np.ndarray, output_path: str, fps: int):
-    """Write (T, H, W, 3) uint8 RGB array to MP4 via OpenCV."""
+    """Write (T, H, W, 3) uint8 BGR array to MP4 via OpenCV.
+    HDF5 from EasyTrainer stores images in BGR format."""
     import cv2
 
     T, H, W, C = images.shape
@@ -67,8 +67,7 @@ def images_to_mp4(images: np.ndarray, output_path: str, fps: int):
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_path, fourcc, fps, (W, H))
     for t in range(T):
-        bgr = cv2.cvtColor(images[t], cv2.COLOR_RGB2BGR)
-        writer.write(bgr)
+        writer.write(images[t])  # Already BGR, write directly
     writer.release()
 
 

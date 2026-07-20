@@ -22,6 +22,8 @@ from gr00t.data.types import MessageType
 from gr00t.policy.gr00t_policy import Gr00tPolicy, _rec_to_dtype
 
 # Register Piper modality config before policy creation
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import examples.Piper.piper_config  # noqa: F401
 
 m.patch()
